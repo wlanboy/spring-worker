@@ -32,7 +32,7 @@ public class PlainExecutorJobService {
 	}
 
 	public void submit(String implementation) {
-		executor.submit(() -> job.run(implementation));
+		executor.execute(() -> job.run(implementation));
 	}
 
 	@PreDestroy
