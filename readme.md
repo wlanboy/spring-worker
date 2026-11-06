@@ -30,6 +30,34 @@ Jede Variante hat einen eigenen Pool. Im Log ist sie am Thread-Namen erkennbar, 
 - `/actuator/health/liveness`
 - `/actuator/health/readiness`: Meldet beim Shutdown sofort `OUT_OF_SERVICE`.
 
+## Was bei jeder Implementierung zu beachten ist
+
+### Für alle Varianten
+
+- Der Executor muss eine Spring-Bean sein oder von einer Bean per `@PreDestroy` geschlossen werden. Ein Pool, den niemand herunterfährt, wird beim Beenden der JVM einfach abgebrochen.
+- `waitForTasksToCompleteOnShutdown=true` allein reicht nicht. Ohne `awaitTerminationMillis` ruft Spring zwar `shutdown()` auf, wartet aber nicht, und die JVM beendet sich mit laufenden Jobs.
+- Die Timeouts hängen voneinander ab: `worker.duration` < `worker.shutdown-timeout` und `worker.duration` < Request-Timeout. Die Shutdown-Phasen laufen nacheinander, im schlechtesten Fall dauert der Shutdown also `timeout-per-shutdown-phase` + `worker.shutdown-timeout`. `terminationGracePeriodSeconds` in Kubernetes muss größer sein, sonst kommt vorher `SIGKILL`.
+- Ein Job, der `InterruptedException` fängt, setzt das Interrupt-Flag wieder (`Thread.currentThread().interrupt()`), damit der Pool den Abbruch mitbekommt.
+- Ist die Queue voll, wird der Job abgelehnt (`TaskRejectedException` bzw. `RejectedExecutionException`). Der Aufrufer muss das behandeln, z. B. mit `503`.
+
+### Request-gebunden
+
+| Variante | Darauf achten |
+|---|---|
+| `Callable` | Läuft auf dem Executor aus `configureAsyncSupport`. Fehlt er, nimmt Spring MVC den `applicationTaskExecutor` von Spring Boot oder, falls es keinen gibt, einen `SimpleAsyncTaskExecutor` ohne Thread-Limit. Timeout ist `spring.mvc.async.request-timeout`. |
+| `WebAsyncTask` | Timeout und Executor im Konstruktor überschreiben die globalen Werte. Ohne Executor-Angabe läuft der Task auf dem MVC-Executor. |
+| `DeferredResult` | Exceptions im Worker abfangen und `setErrorResult()` aufrufen. Sonst hängt der Request bis zum Timeout. Ohne Timeout im Konstruktor gilt `spring.mvc.async.request-timeout`. |
+| `@Async` + `CompletableFuture` | Siehe `@Async void` unten. Der Request-Timeout ist `spring.mvc.async.request-timeout`. |
+
+### Fire-and-forget
+
+| Variante | Darauf achten |
+|---|---|
+| `@Async void` | Braucht `@EnableAsync`. Die Methode muss `public` sein und in einer anderen Bean liegen: Ein Aufruf über `this` umgeht den Proxy und läuft synchron. Ohne Qualifier in `@Async("...")` landet der Job auf dem `applicationTaskExecutor`. Exceptions sieht nur der `AsyncUncaughtExceptionHandler`, standardmäßig werden sie nur geloggt. |
+| JDK-`ExecutorService` | Spring kennt den Lebenszyklus nicht, `shutdown()` + `awaitTermination()` + `shutdownNow()` gehören in `@PreDestroy`. `ExecutorService.close()` wartet unbegrenzt und ist deshalb ungeeignet. Bei `submit()` landen Exceptions im `Future` und gehen verloren, wenn es niemand abfragt; besser `execute()` nutzen oder im Job selbst `try/catch` setzen. |
+| `SimpleAsyncTaskExecutor` (Virtual Threads) | Ohne `taskTerminationTimeout` merkt sich der Executor keine Tasks, und `close()` wartet nicht. Er startet pro Job einen neuen Thread ohne Obergrenze; bei Bedarf `setConcurrencyLimit()` setzen. |
+| `ThreadPoolTaskScheduler` | Standard-Poolgröße ist 1. Die Queue ist unbegrenzt, Jobs werden also nie abgelehnt, sondern stauen sich. Periodische Tasks (`scheduleAtFixedRate` usw.) werden nach dem Shutdown nicht mehr neu gestartet. Ein gerade laufender Durchlauf und einmalige Jobs laufen zu Ende. |
+
 ## Graceful Shutdown
 
 | Einstellung | Wirkung |
