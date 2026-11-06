@@ -2,11 +2,13 @@ package com.example.worker;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -83,6 +85,19 @@ class GracefulShutdownTest {
 		assertBackgroundJobSurvivesShutdown("/work/background/task-scheduler");
 	}
 
+	// --- new requests during shutdown ---------------------------------------------
+
+	@Test
+	void rejectsNewConnectionDuringShutdown() throws Exception {
+		assertNewRequestRejectedDuringShutdown(HttpClient.newHttpClient());
+	}
+
+	@Test
+	void rejectsRequestOnKeepAliveConnectionDuringShutdown() throws Exception {
+		// same client as the health checks in startApp(), so the pooled connection is reused
+		assertNewRequestRejectedDuringShutdown(http);
+	}
+
 	// --- helpers -------------------------------------------------------------------
 
 	private void assertRequestSurvivesShutdown(String path, String implementation) throws Exception {
@@ -119,6 +134,39 @@ class GracefulShutdownTest {
 		closeAppAsync().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
 		// close() only returns after the executor waited for the running job
+		assertJobCompletedNotInterrupted(tracker);
+	}
+
+	/**
+	 * Keeps a job running so the shutdown is in progress, then sends a second request.
+	 * It must not reach the application: either the connection is refused or Tomcat
+	 * answers 503.
+	 */
+	private void assertNewRequestRejectedDuringShutdown(HttpClient client) throws Exception {
+		startApp();
+		var tracker = app.getBean(WorkTracker.class);
+
+		CompletableFuture<HttpResponse<String>> inFlight = http.sendAsync(
+				HttpRequest.newBuilder(uri("/work/request/callable")).GET().build(), BodyHandlers.ofString());
+		assertThat(tracker.awaitStarted(5, TimeUnit.SECONDS)).as("job started").isTrue();
+
+		var port = app.getEnvironment().getProperty("local.server.port");
+		CompletableFuture<Void> shutdown = closeAppAsync();
+
+		var lateRequest = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/work/background/async-void"))
+				.POST(HttpRequest.BodyPublishers.noBody()).timeout(Duration.ofSeconds(5)).build();
+		try {
+			var response = client.send(lateRequest, BodyHandlers.ofString());
+			assertThat(response.statusCode()).as("late request during shutdown").isEqualTo(503);
+		}
+		catch (IOException e) {
+			// ConnectException for a new connection, closed connection for a reused one
+			assertThat(e).isNotInstanceOf(HttpTimeoutException.class);
+		}
+
+		assertThat(inFlight.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
+		shutdown.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+		// the late request did not start a second job
 		assertJobCompletedNotInterrupted(tracker);
 	}
 
