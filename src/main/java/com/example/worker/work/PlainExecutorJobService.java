@@ -1,7 +1,8 @@
 package com.example.worker.work;
 
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
@@ -25,7 +26,8 @@ public class PlainExecutorJobService {
 	public PlainExecutorJobService(SlowJob job, WorkerProperties props) {
 		this.job = job;
 		this.props = props;
-		this.executor = Executors.newFixedThreadPool(props.poolSize(),
+		this.executor = new ThreadPoolExecutor(props.poolSize(), props.poolSize(), 0L, TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(props.queueCapacity()),
 				Thread.ofPlatform().name("executor-service-", 1).factory());
 	}
 

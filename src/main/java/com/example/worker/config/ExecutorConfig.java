@@ -96,7 +96,7 @@ public class ExecutorConfig {
 		var executor = new ThreadPoolTaskExecutor();
 		executor.setCorePoolSize(props.poolSize());
 		executor.setMaxPoolSize(props.poolSize());
-		executor.setQueueCapacity(100);
+		executor.setQueueCapacity(props.queueCapacity());
 		executor.setThreadNamePrefix(threadNamePrefix);
 		executor.setWaitForTasksToCompleteOnShutdown(true);
 		executor.setAwaitTerminationMillis(props.shutdownTimeout().toMillis());
